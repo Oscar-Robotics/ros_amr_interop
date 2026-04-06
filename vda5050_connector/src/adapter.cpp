@@ -83,8 +83,7 @@ void AdapterNode::on_configure()
   nav_to_node_loader_ = std::make_unique<pluginlib::ClassLoader<adapter::NavToNode>>(
     plugin_package_, nav_to_node_class_plugin_);
 
-  std::string base_interface_name = std::string(get_namespace()) + "/";
-  base_interface_name += manufacturer_name_ + std::string("/");
+  std::string base_interface_name = manufacturer_name_ + std::string("/");
   base_interface_name += robot_name_ + std::string("/");
 
   // Services

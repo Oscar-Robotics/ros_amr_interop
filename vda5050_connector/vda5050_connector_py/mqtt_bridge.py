@@ -62,6 +62,7 @@ from vda5050_msgs.msg import Node as VDANode
 from vda5050_msgs.msg import NodePosition as VDANodePosition
 from vda5050_msgs.msg import Order as VDAOrder
 from vda5050_msgs.msg import OrderState as VDAOrderState
+from vda5050_msgs.msg import Corridor as VDACorridor
 from vda5050_msgs.msg import Trajectory as VDATrajectory
 from vda5050_msgs.msg import Visualization as VDAVisualization
 
@@ -139,6 +140,20 @@ def generate_vda_order_msg(order):
                     for cp in edge["trajectory"]["control_points"]
                 ],
             )
+
+        if "corridor" in edge:
+            c = edge["corridor"]
+            edge["has_corridor"] = True
+            edge["corridor"] = VDACorridor(
+                left_width=float(c["left_width"]),
+                right_width=float(c["right_width"]),
+                corridor_ref_point=c.get("corridor_ref_point", ""),
+                release_required=bool(c.get("release_required", False)),
+                release_loss_behavior=c.get("release_loss_behavior", ""),
+            )
+        else:
+            edge["has_corridor"] = False
+
     vda_order["edges"] = [VDAEdge(**edge) for edge in vda_order["edges"]]
     # TODO(@leandropineda): Consider returning a ROS2 Order message
     return vda_order

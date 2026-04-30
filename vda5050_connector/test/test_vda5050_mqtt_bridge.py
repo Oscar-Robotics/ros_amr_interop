@@ -449,7 +449,7 @@ def test_vda5050_mqtt_bridge_defaults(setup_rclpy, mocker, mock_mqtt_client):
     will_payload = convert_ros_message_to_json(msg)
 
     mqtt_client.will_set.assert_called_with(
-        topic="uagv/v1/robots/robot_1/connection",
+        topic="vda5050/v1/robots/robot_1/connection",
         payload=will_payload,
         qos=1,
         retain=True,
@@ -500,29 +500,29 @@ def test_vda5050_mqtt_bridge_subscriptions(setup_rclpy, mocker, mock_mqtt_client
     mqtt_bridge = MQTTBridge()
     mqtt_bridge.create_subscription.assert_any_call(
         msg_type=OrderState,
-        topic="/uagv/v1/robots/robot_1/state",
+        topic="/vda5050/v1/robots/robot_1/state",
         callback=mqtt_bridge._publish_state,
         qos_profile=10,
     )
     mqtt_bridge.create_subscription.assert_any_call(
         msg_type=Connection,
-        topic="/uagv/v1/robots/robot_1/connection",
+        topic="/vda5050/v1/robots/robot_1/connection",
         callback=mqtt_bridge._publish_connection,
         qos_profile=10,
     )
     mqtt_bridge.create_subscription.assert_any_call(
         msg_type=Visualization,
-        topic="/uagv/v1/robots/robot_1/visualization",
+        topic="/vda5050/v1/robots/robot_1/visualization",
         callback=mqtt_bridge._publish_visualization,
         qos_profile=10,
     )
 
     mqtt_bridge.create_publisher.assert_any_call(
-        msg_type=Order, topic="/uagv/v1/robots/robot_1/order", qos_profile=10
+        msg_type=Order, topic="/vda5050/v1/robots/robot_1/order", qos_profile=10
     )
     mqtt_bridge.create_publisher.assert_any_call(
         msg_type=InstantActions,
-        topic="/uagv/v1/robots/robot_1/instantActions",
+        topic="/vda5050/v1/robots/robot_1/instantActions",
         qos_profile=10,
     )
 

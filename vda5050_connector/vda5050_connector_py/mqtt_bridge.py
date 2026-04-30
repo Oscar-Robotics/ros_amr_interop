@@ -236,6 +236,7 @@ def generate_vda5050_topic_alias(vda_version):
             f"but got {vda_version}"
         )
 
+
 class MQTTBridge(Node):
     """Translates VDA5050 MQTT messages from and to ROS2."""
 
@@ -259,28 +260,55 @@ class MQTTBridge(Node):
         )
         self._serial_number = read_str_parameter(self, "serial_number", "robot_1")
 
-        self._interface_name = read_str_parameter(self, "interface_name", "uagv")
+        self._interface_name = read_str_parameter(self, "interface_name", "vda5050")
 
-        # Configure MQTT
+        mqtt_tls_ca_cert = read_str_parameter(self, "mqtt_tls_ca_cert", "")
+        mqtt_tls_client_cert = read_str_parameter(self, "mqtt_tls_client_cert", "")
+        mqtt_tls_client_key = read_str_parameter(self, "mqtt_tls_client_key", "")
+
         self.mqtt_client = mqtt_client.Client(
-            client_id=f'{self._manufacturer_name}_{self._serial_number}'
+            client_id=f'{self._manufacturer_name}_{self._serial_number}',
+            callback_api_version=mqtt_client.CallbackAPIVersion.VERSION2,
         )
+
         self.mqtt_client.on_connect = self.on_connect_mqtt
         self.mqtt_client.on_message = self.on_message_mqtt
         self.mqtt_client.on_disconnect = self.on_disconnect_mqtt
 
-        # Enable TLS if username is provided
-        if mqtt_username:
-            self.mqtt_client.tls_set(
-                ca_certs=os.getenv(
-                    key="VDA5050_CONNECTOR_TLS_CA_CERT",
-                    default="/etc/ssl/certs/ca-certificates.crt",
-                ),
-                tls_version=ssl.PROTOCOL_TLSv1_2,
-            )
-            self.mqtt_client.username_pw_set(
-                username=mqtt_username, password=mqtt_password
-            )
+        if mqtt_username or mqtt_tls_client_cert:
+            # create_default_context loads system CAs automatically (handles Let's Encrypt)
+            context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+
+            # Prefer TLS 1.3 when available
+            if hasattr(ssl, "TLSVersion"):
+                try:
+                    context.minimum_version = ssl.TLSVersion.TLSv1_3
+                    context.maximum_version = ssl.TLSVersion.TLSv1_3
+                except Exception:
+                    pass
+
+            # Override CA bundle if explicitly provided (ROS param takes priority over env var)
+            ca_path = mqtt_tls_ca_cert or os.getenv("VDA5050_CONNECTOR_TLS_CA_CERT", "")
+            if ca_path:
+                context.load_verify_locations(cafile=ca_path)
+
+            # Load client cert/key for mTLS (ROS params take priority over env vars)
+            cert_file = mqtt_tls_client_cert or os.getenv("VDA5050_CONNECTOR_TLS_CLIENT_CERT", "")
+            key_file = mqtt_tls_client_key or os.getenv("VDA5050_CONNECTOR_TLS_CLIENT_KEY", "")
+            if cert_file and key_file:
+                context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+            else:
+                self.logger.warn(
+                    "mTLS: no client cert/key configured — broker will reject the connection. "
+                    "Set mqtt_tls_client_cert and mqtt_tls_client_key parameters."
+                )
+
+            self.mqtt_client.tls_set_context(context)
+
+            if mqtt_username:
+                self.mqtt_client.username_pw_set(
+                    username=mqtt_username, password=mqtt_password
+                )
 
         # Configure will message or last testament message
         will_topic = get_vda5050_mqtt_topic(
@@ -338,9 +366,9 @@ class MQTTBridge(Node):
                 self.logger.error(f"Error during connection attempt: {e}. Will retry again.")
                 pass
 
-    def on_connect_mqtt(self, client, userdata, flags, rc):
+    def on_connect_mqtt(self, client, userdata, connect_flags, reason_code, properties):
         """MQTT client connect callback."""
-        if rc == 0:
+        if reason_code == 0:
             self.logger.info("Connected to MQTT Broker!")
 
             # Cancel the connection timer
@@ -377,7 +405,7 @@ class MQTTBridge(Node):
             )
 
         else:
-            self.logger.error("Failed to connect, return code %d\n", rc)
+            self.logger.error(f"Failed to connect, return code {reason_code}\n")
 
     def on_message_mqtt(self, client, userdata, msg):
         """MQTT client message callback."""
@@ -401,12 +429,14 @@ class MQTTBridge(Node):
             self.logger.warn(f"Ignoring invalid VDA5050 message: {ex}.")
             return
 
-    def on_disconnect_mqtt(self, client, userdata, rc):
-        """MQTT client disconnect callback."""
-        if rc != 0:
+    def on_disconnect_mqtt(self, client, userdata, disconnect_flags, reason_code, properties):
+        """MQTT client disconnect callback using paho v2 signature."""
+        if reason_code != 0:
             self.logger.info(
-                f"MQTT client disconnected (rc: {rc}, {error_string(rc)}). Trying to reconnect."
+                f"MQTT client disconnected (rc: {reason_code}, {error_string(reason_code.value)}). Trying to reconnect."
             )
+            if hasattr(self, '_connect_timer'):
+                self._connect_timer.reset()
         else:
             self.logger.info("Disconnected from MQTT Broker!")
 

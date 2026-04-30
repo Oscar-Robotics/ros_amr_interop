@@ -70,7 +70,7 @@ def test_json_snake_to_camel_case(test_input, expected):
 @pytest.mark.parametrize(
     "test_input, expected",
     [
-        ({"manufacturer": "M", "serial_number": "SN", "topic": "order"}, "uagv/v1/M/SN/order"),
+        ({"manufacturer": "M", "serial_number": "SN", "topic": "order"}, "vda5050/v1/M/SN/order"),
         (
             {
                 "manufacturer": "M",
@@ -95,7 +95,7 @@ def test_get_vda5050_mqtt_topic(test_input, expected):
                 "manufacturer": "M",
                 "serial_number": "SN",
                 "topic": "order",
-                "interface_name": "uagv",
+                "interface_name": "vda5050",
                 "major_version": "v123",
             },
             pytest.raises(ValueError),
@@ -114,7 +114,7 @@ def test_get_vda5050_mqtt_topic_exceptions(test_input, expectation):
 @pytest.mark.parametrize(
     "test_input, expected",
     [
-        ({"manufacturer": "M", "serial_number": "SN", "topic": "order"}, "/uagv/v1/M/SN/order"),
+        ({"manufacturer": "M", "serial_number": "SN", "topic": "order"}, "/vda5050/v1/M/SN/order"),
         (
             {
                 "manufacturer": "M",
@@ -139,7 +139,7 @@ def test_get_vda5050_ros2_topic(test_input, expected):
                 "manufacturer": "M",
                 "serial_number": "SN",
                 "topic": "order",
-                "interface_name": "uagv",
+                "interface_name": "vda5050",
                 "major_version": "v123",
             },
             pytest.raises(ValueError),

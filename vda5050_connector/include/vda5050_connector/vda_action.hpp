@@ -253,12 +253,20 @@ public:
   /**
    * @brief State function: finished.
    */
-  virtual void finish() { update_action_state(STATES::FINISHED); }
+  virtual void finish()
+  {
+    update_action_state(STATES::FINISHED);
+    goal_handle_->succeed(result_);
+  }
 
   /**
    * @brief State function: failed.
    */
-  virtual void fail() { update_action_state(STATES::FAILED); }
+  virtual void fail()
+  {
+    update_action_state(STATES::FAILED);
+    goal_handle_->abort(result_);
+  }
 
   /**
    * @brief Cancel the current VDA action.

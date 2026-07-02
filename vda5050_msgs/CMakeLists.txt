@@ -26,6 +26,7 @@ set(msg_files
     "msg/BoundingBoxReference.msg"
     "msg/Connection.msg"
     "msg/ControlPoint.msg"
+    "msg/Corridor.msg"
     "msg/CurrentAction.msg"
     "msg/Edge.msg"
     "msg/EdgeState.msg"

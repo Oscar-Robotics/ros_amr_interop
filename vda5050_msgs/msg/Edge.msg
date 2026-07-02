@@ -46,3 +46,7 @@ vda5050_msgs/Action[] actions       # Array of action_ids to be executed on the 
                                     # only be active for the time that the AGV is traversing the edge which triggered
                                     # the action. When the AGV leaves the edge, the action will stop and the state
                                     # before entering the edge will be restored.
+
+bool has_corridor                   # True if the corridor field below is populated (corridor is optional in VDA5050).
+vda5050_msgs/Corridor corridor      # Optional Corridor boundaries within which the vehicle may deviate from
+                                    # the trajectory for obstacle avoidance. Only valid when has_corridor is true.

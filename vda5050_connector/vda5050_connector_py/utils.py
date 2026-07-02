@@ -221,7 +221,7 @@ def convert_ros_message_to_json(msg):
 
 
 def get_vda5050_mqtt_topic(
-    manufacturer, serial_number, topic, major_version, interface_name="uagv",
+    manufacturer, serial_number, topic, major_version, interface_name="vda5050",
 ):
     """
     Return suggested VDA5050 MQTT topics.
@@ -230,7 +230,7 @@ def get_vda5050_mqtt_topic(
     VDA5050 standard suggests topic levels as follows:
 
     ``interfaceName/majorVersion/manufacturer/serialNumber/topic``
-    Example: uagv/v2/KIT/0001/order
+    Example: vda5050/v2/KIT/0001/order
 
     Note: Since the ``/`` character is used to define topic hierarchies, it
     must not be used in any of the aforementioned fields. The ``$`` character
@@ -243,7 +243,7 @@ def get_vda5050_mqtt_topic(
         serial_number (string): Unique robot serial number consisting of the following
             characters: ``A-Z a-z 0-9 _ - . :``
         topic (string): Subtopic for communication.
-        interface_name (str, optional): Name of the used interface. Defaults to "uagv".
+        interface_name (str, optional): Name of the used interface. Defaults to "vda5050".
         major_version (str, optional): Major version number, preceded by "v". Defaults to "v1".
 
     Raises
@@ -275,7 +275,7 @@ def get_vda5050_mqtt_topic(
 
 
 def get_vda5050_ros2_topic(
-    manufacturer, serial_number, topic, interface_name="uagv", major_version="v1"
+    manufacturer, serial_number, topic, interface_name="vda5050", major_version="v1"
 ):
     """
     Return ROS2 topics used for communication between controller and adapter.
@@ -283,7 +283,7 @@ def get_vda5050_ros2_topic(
     Note that these topics follow the same structure as the one defined on the
     VDA5050 standard, but preceded by ``/``.
 
-    Example: /uagv/v2/KIT/0001/order
+    Example: /vda5050/v2/KIT/0001/order
 
 
     Args
@@ -292,7 +292,7 @@ def get_vda5050_ros2_topic(
         serial_number (string): Unique robot serial number consisting of the following
             characters: ``A-Z a-z 0-9 _ - . :``
         topic (string): Subtopic for communication.
-        interface_name (str, optional): Name of the used interface. Defaults to "uagv".
+        interface_name (str, optional): Name of the used interface. Defaults to "vda5050".
         major_version (str, optional): Major version number, preceded by "v". Defaults to "v1".
 
     Raises

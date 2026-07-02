@@ -97,7 +97,7 @@ DEFAULT_SERIAL_NUMBER = "robot_1"
 DEFAULT_PROTOCOL_VERSION = "2.0.0"
 DEFAULT_STARTING_NODE_ID = ""
 SUPPORTED_PROTOCOL_VERSIONS = ["1.1.0", "2.0.0"]
-DEFAULT_INTERFACE_NAME = "uagv"
+DEFAULT_INTERFACE_NAME = "vda5050"
 
 DEFAULT_GET_STATE_SVC_NAME = "adapter/get_state"
 DEFAULT_SUPPORTED_ACTIONS_SVC_NAME = "adapter/supported_actions"
@@ -239,7 +239,7 @@ class VDA5050Controller(Node):
     def _configure_action_clients(self):
         """Configure Controller <> Adapter ROS Action interfaces."""
         base_interface_name = (
-            f"{self.get_namespace()}/{self._manufacturer_name}/{self._robot_name}/"
+            f"{self._manufacturer_name}/{self._robot_name}/"
         )
         # Action client for sending NavigateToNode goals to adapter
         self._navigate_to_node_act_cli = ActionClient(
@@ -268,7 +268,7 @@ class VDA5050Controller(Node):
     def _configure_service_clients(self):
         """Configure Controller <> Adapter ROS Service interfaces."""
         base_interface_name = (
-            f"{self.get_namespace()}/{self._manufacturer_name}/{self._robot_name}/"
+            f"{self._manufacturer_name}/{self._robot_name}/"
         )
         # Service client to request GetState from the adapter
         self._get_adapter_state_svc_cli = self.create_client(

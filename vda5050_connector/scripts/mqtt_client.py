@@ -46,6 +46,8 @@ Configuration is via environment variables:
   VDA5050_PROTOCOL_VERSION (default 2.0.0)
   MANUFACTURER_NAME, SERIAL_NUMBER, INTERFACE_NAME (default vda5050)
   UNIX_SOCKET_PATH (default /run/osc-mqtt-bridge.sock)
+  CERT_EXPIRY_WARNING_WINDOW (seconds, default 259200 = 72h)
+  CERT_EXPIRY_CHECK_INTERVAL (seconds, default 3600)
 """
 
 import json
@@ -53,6 +55,7 @@ import logging
 import os
 import socket
 import ssl
+import subprocess
 import threading
 import time
 
@@ -140,6 +143,11 @@ class MQTTClient:
         self.mqtt_client.on_message = self._on_message_mqtt
         self.mqtt_client.on_disconnect = self._on_disconnect_mqtt
 
+        self._cert_file = None
+        self._cert_warning_window_s = int(_env("CERT_EXPIRY_WARNING_WINDOW", str(72 * 3600)))
+        self._cert_check_interval_s = int(_env("CERT_EXPIRY_CHECK_INTERVAL", str(3600)))
+        self._last_cert_check = 0.0
+
         use_encryption = _env("USE_ENCRYPTION", "1") not in ("0", "false", "False", "")
         if use_encryption:
             context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
@@ -156,6 +164,7 @@ class MQTTClient:
 
             cert_file = _env("MQTT_TLS_CLIENT_CERT", "")
             key_file = _env("MQTT_TLS_CLIENT_KEY", "")
+            self._cert_file = cert_file or None
             if cert_file and key_file:
                 context.load_cert_chain(certfile=cert_file, keyfile=key_file)
             else:
@@ -250,6 +259,55 @@ class MQTTClient:
             _connection_json(self._manufacturer_name, self._serial_number, self.vda5050_version, state),
         )
 
+    # ── Cert expiry warning ──────────────────────────────────────
+    # This daemon is the only process holding the runtime cert, and
+    # step-ca-renew.service only logs failures locally — nothing
+    # upstream sees a stuck renewal until MQTT actually breaks. Surface
+    # it over MQTT instead, on a non-VDA5050-spec sibling topic (adding
+    # a custom field to "connection" isn't an option: connectionState
+    # is a fixed enum).
+    def _check_cert_expiry(self):
+        now = time.monotonic()
+        if now - self._last_cert_check < self._cert_check_interval_s:
+            return
+        self._last_cert_check = now
+
+        if not self._cert_file:
+            return
+        try:
+            result = subprocess.run(
+                ["openssl", "x509", "-checkend", str(self._cert_warning_window_s), "-noout", "-in", self._cert_file],
+                capture_output=True, timeout=10,
+            )
+        except Exception as e:
+            log.warning(f"Cert expiry check failed to run: {e}")
+            return
+
+        if result.returncode == 0:
+            return  # still valid well past the warning window
+
+        try:
+            enddate_out = subprocess.run(
+                ["openssl", "x509", "-enddate", "-noout", "-in", self._cert_file],
+                capture_output=True, timeout=10, text=True,
+            ).stdout.strip()
+            expires_at = enddate_out.split("=", 1)[1] if "=" in enddate_out else enddate_out
+        except Exception:
+            expires_at = "unknown"
+
+        log.warning(f"Runtime cert expires soon ({expires_at}) — step-ca-renew.service may be stuck")
+        self._publish_to_mqtt(
+            "certStatus",
+            json.dumps(
+                {
+                    "manufacturer": self._manufacturer_name,
+                    "serialNumber": self._serial_number,
+                    "warning": "CERT_EXPIRING_SOON",
+                    "expiresAt": expires_at,
+                }
+            ),
+        )
+
     # ── IPC server (accepts the ROS2-side mqtt_bridge node) ─────
     def _forward_to_ipc(self, topic_type, payload_json):
         with self._ipc_lock:
@@ -334,6 +392,7 @@ class MQTTClient:
             while not self._stop.is_set():
                 if not self.mqtt_client.is_connected():
                     self._connect_to_broker()
+                self._check_cert_expiry()
                 time.sleep(5.0)
         except KeyboardInterrupt:
             pass

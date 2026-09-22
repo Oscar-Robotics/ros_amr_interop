@@ -33,6 +33,7 @@ import pytest
 import paho.mqtt.client as mqtt
 
 import rclpy
+from vda5050_connector_py.vda5050_controller import VDA5050Controller
 from vda5050_connector.action import NavigateToNode
 from vda5050_connector.action import ProcessVDAAction
 from vda5050_connector_py.vda5050_controller import DEFAULT_NAV_TO_NODE_ACT_NAME
@@ -184,6 +185,22 @@ def service_supported_actions(adapter_node):
         f"/vda5050/robots/robot_1/{DEFAULT_SUPPORTED_ACTIONS_SVC_NAME}",
         lambda _: adapter_node.get_logger().info("Supported actions request"),
     )
+
+
+@pytest.fixture
+def controller_node(
+    action_server_nav_to_node,
+    action_server_process_vda_action,
+    service_get_state,
+    service_supported_actions,
+):
+    """A VDA5050Controller wired to the fake adapter fixtures above, always
+    destroyed on teardown — even if the test body raises — so leftover
+    clients/services don't accumulate on the shared rclpy context across
+    tests and eventually wedge a later test's discovery."""
+    node = VDA5050Controller()
+    yield node
+    node.destroy_node()
 
 
 @pytest.fixture

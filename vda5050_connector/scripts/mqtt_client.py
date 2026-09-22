@@ -243,7 +243,7 @@ class MQTTClient:
 
         self._forward_to_ipc(topic_type, msg.payload.decode("utf-8"))
 
-    def _publish_to_mqtt(self, topic_type, payload_json):
+    def _publish_to_mqtt(self, topic_type, payload_json, retain=False):
         topic = get_vda5050_mqtt_topic(
             manufacturer=self._manufacturer_name,
             serial_number=self._serial_number,
@@ -251,12 +251,13 @@ class MQTTClient:
             major_version=self.vda5050_version_alias,
             interface_name=self._interface_name,
         )
-        self.mqtt_client.publish(topic, payload_json)
+        self.mqtt_client.publish(topic, payload_json, retain=retain)
 
     def _publish_connection_state(self, state):
         self._publish_to_mqtt(
             "connection",
             _connection_json(self._manufacturer_name, self._serial_number, self.vda5050_version, state),
+            retain=True,
         )
 
     # ── Cert expiry warning ──────────────────────────────────────

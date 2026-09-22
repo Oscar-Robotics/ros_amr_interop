@@ -34,7 +34,6 @@ from rclpy.logging import LoggingSeverity
 
 from uuid import uuid4
 
-from vda5050_connector_py.vda5050_controller import VDA5050Controller
 from vda5050_connector_py.utils import get_vda5050_ts
 from vda5050_connector.action import ProcessVDAAction
 
@@ -121,13 +120,11 @@ def get_test_order():
 def test_vda5050_controller_node_order_processing(
     mocker,
     adapter_node,
-    action_server_nav_to_node,
     action_server_process_vda_action,
-    service_get_state,
-    service_supported_actions,
+    controller_node,
 ):
 
-    node = VDA5050Controller()
+    node = controller_node
     node.logger.set_level(LoggingSeverity.DEBUG)
 
     # Add a spy to validate used process vda actions parameters

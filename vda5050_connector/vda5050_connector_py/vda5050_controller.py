@@ -170,6 +170,7 @@ class VDA5050Controller(Node):
             manufacturer=self._manufacturer_name,
             serial_number=self._serial_number,
         )
+        self._get_state_in_flight = False
         self._current_visualization = VDAVisualization(
             header_id=0,
             version=self._protocol_version,
@@ -612,27 +613,26 @@ class VDA5050Controller(Node):
 
     # ---- Adapter's state ----
 
-    def get_state_from_adapter(self, async_call: bool = False, action: VDAAction = None):
+    def get_state_from_adapter(self, action: VDAAction = None):
         """
-        Request the adapter's state and updates the current state.
+        Request the adapter's state and update the current state.
+
+        Always async: a synchronous call() here can wedge the client forever
+        on a dropped/slow response, with no way to recover.
 
         Args:
         ----
-            async_call (bool): True to perform an async call to the GetState service.
-                False for a sync call (default False).
-            action (VDAAction): Optional VDA action required to update its status on
-                async calls (default is None).
+            action (VDAAction): Optional VDA action required to update its status
+                once the response arrives (default is None).
 
         """
-        if async_call:
-            future = self._get_adapter_state_svc_cli.call_async(GetState.Request())
-            future.add_done_callback(
-                functools.partial(self._get_state_from_adapter_callback, action)
-            )
+        if self._get_state_in_flight:
             return
-
-        order_state = self._get_adapter_state_svc_cli.call(GetState.Request())
-        self._update_state_from_adapter(order_state)
+        self._get_state_in_flight = True
+        future = self._get_adapter_state_svc_cli.call_async(GetState.Request())
+        future.add_done_callback(
+            functools.partial(self._get_state_from_adapter_callback, action)
+        )
 
     def _get_state_from_adapter_callback(self, action: VDAAction, future: Future):
         """
@@ -644,6 +644,7 @@ class VDA5050Controller(Node):
             future (Future): Service response future.
 
         """
+        self._get_state_in_flight = False
         if action:
             self._update_action_status(action.action_id, VDACurrentAction.FINISHED, action.result_description)
         self._update_state_from_adapter(future.result())
@@ -730,7 +731,7 @@ class VDA5050Controller(Node):
                 continue
             elif action.action_type == "stateRequest":
                 self._update_action_status(action.action_id, VDACurrentAction.RUNNING)
-                self.get_state_from_adapter(async_call=True, action=action)
+                self.get_state_from_adapter(action=action)
                 continue
             elif action.action_type == "factsheetRequest":
                 # Populate the current factsheet msg reading and requesting its info

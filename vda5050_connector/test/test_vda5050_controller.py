@@ -35,12 +35,14 @@ from rclpy.task import Future
 
 from uuid import uuid4
 
-from vda5050_connector_py.vda5050_controller import VDA5050Controller
 from vda5050_connector_py.vda5050_controller import OrderAcceptModes
 from vda5050_connector_py.vda5050_controller import OrderRejectErrors
 from vda5050_connector_py.utils import get_vda5050_ts
 from vda5050_connector.action import NavigateToNode
+from vda5050_connector.srv import GetState
 
+from vda5050_msgs.msg import AGVPosition
+from vda5050_msgs.msg import OrderState
 from vda5050_msgs.msg import Order
 from vda5050_msgs.msg import Node
 from vda5050_msgs.msg import Edge
@@ -368,13 +370,10 @@ def get_stitch_orders(order_id=str(uuid4())):
 def test_vda5050_controller_node_new_order(
     mocker,
     adapter_node,
-    action_server_nav_to_node,
-    action_server_process_vda_action,
-    service_get_state,
-    service_supported_actions,
+    controller_node,
 ):
 
-    node = VDA5050Controller()
+    node = controller_node
     node.logger.set_level(LoggingSeverity.DEBUG)
 
     # add a spy to validate used navigation goal parameters
@@ -476,12 +475,9 @@ def test_vda5050_controller_node_new_order(
 def test_vda5050_controller_node_update_order(
     mocker,
     adapter_node,
-    action_server_nav_to_node,
-    action_server_process_vda_action,
-    service_get_state,
-    service_supported_actions,
+    controller_node,
 ):
-    node = VDA5050Controller()
+    node = controller_node
     node.logger.set_level(LoggingSeverity.DEBUG)
 
     # add a spy to validate used navigation goal parameters
@@ -562,12 +558,9 @@ def test_vda5050_controller_node_update_order(
 def test_vda5050_controller_node_stitch_order(
     mocker,
     adapter_node,
-    action_server_nav_to_node,
-    action_server_process_vda_action,
-    service_get_state,
-    service_supported_actions,
+    controller_node,
 ):
-    node = VDA5050Controller()
+    node = controller_node
     node.logger.set_level(LoggingSeverity.DEBUG)
 
     # add a spy to validate accept order is called correctly
@@ -626,13 +619,9 @@ def test_vda5050_controller_node_stitch_order(
 
 def test_vda5050_controller_node_reject_order(
     mocker,
-    adapter_node,
-    action_server_nav_to_node,
-    action_server_process_vda_action,
-    service_get_state,
-    service_supported_actions,
+    controller_node,
 ):
-    node = VDA5050Controller()
+    node = controller_node
     node.logger.set_level(LoggingSeverity.DEBUG)
 
     # add a spy to validate that the order has been rejected
@@ -667,3 +656,88 @@ def test_vda5050_controller_node_reject_order(
         error=OrderRejectErrors.ORDER_UPDATE_ERROR,
         description="New update id 0 lower than old update id 1",
     )
+
+
+def test_get_state_from_adapter_never_blocks_the_node(
+    mocker,
+    adapter_node,
+    controller_node,
+):
+    """A dropped/slow GetState response must never wedge the node — only the
+    async path (call_async) is used, never the blocking call(). The client
+    methods are fully replaced (not spied) so a real blocking call() — the
+    exact production hang — can't execute even if this hasn't been fixed yet."""
+    node = controller_node
+
+    mock_call = mocker.patch.object(
+        node._get_adapter_state_svc_cli,
+        "call",
+        return_value=GetState.Response(state=OrderState(agv_position=AGVPosition())),
+    )
+    mock_call_async = mocker.patch.object(
+        node._get_adapter_state_svc_cli, "call_async", return_value=Future()
+    )
+
+    node.get_state_from_adapter()
+
+    mock_call.assert_not_called()
+    mock_call_async.assert_called_once()
+
+
+def test_get_state_from_adapter_skips_a_call_while_one_is_in_flight(
+    mocker,
+    controller_node,
+):
+    """A second request must not pile up on the client while the first has
+    not resolved yet — cheap insurance against a period shorter than the
+    round-trip time."""
+    node = controller_node
+
+    mock_call_async = mocker.patch.object(
+        node._get_adapter_state_svc_cli, "call_async", return_value=Future()
+    )
+
+    node.get_state_from_adapter()
+    node.get_state_from_adapter()
+
+    mock_call_async.assert_called_once()
+
+
+def test_get_state_from_adapter_allows_a_new_call_once_the_response_arrives(
+    mocker,
+    controller_node,
+):
+    """The in-flight guard must clear once the response is delivered, so the
+    next timer tick isn't permanently skipped."""
+    node = controller_node
+
+    future = Future()
+    mock_call_async = mocker.patch.object(
+        node._get_adapter_state_svc_cli, "call_async", return_value=future
+    )
+
+    node.get_state_from_adapter()
+    future.set_result(GetState.Response(state=OrderState(agv_position=AGVPosition())))
+
+    node.get_state_from_adapter()
+
+    assert mock_call_async.call_count == 2
+
+
+def test_publish_visualization_never_blocks_the_node(
+    mocker,
+    controller_node,
+):
+    """The visualization timer's periodic state refresh must go through the
+    same never-blocks path as get_state_from_adapter()."""
+    node = controller_node
+
+    mock_call = mocker.patch.object(node._get_adapter_state_svc_cli, "call")
+    mock_call_async = mocker.patch.object(
+        node._get_adapter_state_svc_cli, "call_async", return_value=Future()
+    )
+
+    node._publish_visualization()
+
+    mock_call.assert_not_called()
+    mock_call_async.assert_called_once()

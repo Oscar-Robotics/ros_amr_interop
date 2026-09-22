@@ -2,27 +2,26 @@
 """Length-prefixed JSON framing for the local mqtt_bridge <-> mqtt_client_daemon
 IPC socket.
 
-Split introduced 2026-09-18 (cybersecurity/issues/01, osc_beta incident
-follow-up): mqtt_bridge.py (ROS2 side, DDS participant) and
-mqtt_client_daemon.py (paho/cert-holding side, separate Linux user) can no
-longer share a process — cross-user ROS2/DDS discovery is a known,
-unresolved upstream limitation once the host has network connectivity
-(eProsima/Fast-DDS#1750, open since 2021, empirically confirmed on this
-fleet 2026-09-18). This module is the minimal glue between the two halves.
+mqtt_bridge.py (ROS2 side, DDS participant) and mqtt_client_daemon.py
+(paho/cert-holding side, separate Linux user) can't share a process —
+cross-user ROS2/DDS discovery is a known, unresolved upstream limitation
+once the host has network connectivity (eProsima/Fast-DDS#1750, open
+since 2021). This module is the minimal glue between the two halves.
 
 This channel carries only VDA5050 order/state/instantActions/connection/
 visualization JSON — the same content that already transits MQTT in the
 clear at the application layer — so it intentionally has no encryption of
 its own. Its only real security property is the Unix socket file's
 permissions (owner mqtt-bridge-user, group shared with whichever account
-runs the ROS2 stack — see stepca-setup.sh --mqtt-user). No certificate or
-key material ever crosses this socket.
+runs the ROS2 stack — see fleet/mqtt-daemon.sh --mqtt-user). No
+certificate or key material ever crosses this socket.
 """
 import json
+import os
 import socket
 import struct
 
-DEFAULT_SOCKET_PATH = "/run/osc-mqtt-bridge/bridge.sock"
+DEFAULT_SOCKET_PATH = os.environ.get("OSC_MQTT_SOCKET_PATH", "/run/osc-mqtt-bridge/bridge.sock")
 
 _HEADER = struct.Struct("!I")  # 4-byte big-endian length prefix
 MAX_FRAME_BYTES = 4 * 1024 * 1024  # generous upper bound, VDA5050 orders can be large-ish

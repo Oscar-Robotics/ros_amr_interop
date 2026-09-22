@@ -32,24 +32,19 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 # Python dependencies
-from paho.mqtt import client as mqtt_client
-from paho.mqtt.client import error_string
 import copy
 import json
-import ssl
-import os
+import socket
+import threading
 
 # ROS dependencies / utils
 from rclpy.node import Node
 
-from vda5050_connector_py.utils import get_vda5050_mqtt_topic
+from vda5050_connector_py import unix_socket_protocol
 from vda5050_connector_py.utils import get_vda5050_ros2_topic
 from vda5050_connector_py.utils import json_camel_to_snake_case
-from vda5050_connector_py.utils import read_str_parameter, read_int_parameter
 from vda5050_connector_py.utils import convert_ros_message_to_json
-from vda5050_connector_py.utils import get_vda5050_ts
-
-from vda5050_connector_py.vda5050_controller import DEFAULT_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS
+from vda5050_connector_py.ros_utils import read_str_parameter
 
 # ROS msgs / srvs / actions
 from vda5050_msgs.msg import Action as VDAAction
@@ -210,242 +205,118 @@ def generate_vda_instant_action_msg(instant_action):
     return vda_instant_action
 
 
-def generate_vda5050_topic_alias(vda_version):
-    """
-    Create an alias for the current vda5050 version. The aliases are needed to
-    create the mqtt topics.
-
-    Args:
-    ----
-        vda_version (string): VDA5050 version with format x.x.x.
-
-    Raises:
-    ------
-        ValueError if the alias is not within the supported values.
-
-    Returns
-    -------
-        The alias of the version. For example, for the version '2.0.0', the alias is
-        'v2'
-    """
-    if vda_version in SUPPORTED_PROTOCOL_VERSIONS:
-        return f"v{vda_version[0]}"
-    else:
-        raise ValueError(
-            f"Invalid protocol major version. Supported versions are: {SUPPORTED_PROTOCOL_VERSIONS},"
-            f"but got {vda_version}"
-        )
-
-
 class MQTTBridge(Node):
-    """Translates VDA5050 MQTT messages from and to ROS2."""
+    """Translates VDA5050 messages between ROS2 topics and the local mqtt_client IPC socket."""
 
     def __init__(self):
         super().__init__(NODE_NAME)
         self.logger = self.get_logger()
 
-        # Declare Node configuration parameter. Use default values if no parameters
-        # are defined on launchfile. Provide the parameter when running the launchfile
-        # by using ``foo.launch.py mqtt_address:=localhost mqtt_port:=1883 ...``
-        mqtt_address = read_str_parameter(self, "mqtt_address", "localhost")
-        mqtt_port = read_int_parameter(self, "mqtt_port", 1883)
-        mqtt_username = read_str_parameter(self, "mqtt_username", "")
-        mqtt_password = read_str_parameter(self, "mqtt_password", "")
-
-        self.vda5050_version = read_str_parameter(self, "vda5050_protocol_version", "2.0.0")
-        self.vda5050_version_alias = generate_vda5050_topic_alias(self.vda5050_version)
-
         self._manufacturer_name = read_str_parameter(
             self, "manufacturer_name", "robots"
         )
         self._serial_number = read_str_parameter(self, "serial_number", "robot_1")
-
         self._interface_name = read_str_parameter(self, "interface_name", "vda5050")
-
-        mqtt_tls_ca_cert = read_str_parameter(self, "mqtt_tls_ca_cert", "")
-        mqtt_tls_client_cert = read_str_parameter(self, "mqtt_tls_client_cert", "")
-        mqtt_tls_client_key = read_str_parameter(self, "mqtt_tls_client_key", "")
-
-        self.mqtt_client = mqtt_client.Client(
-            client_id=f'{self._manufacturer_name}_{self._serial_number}',
-            callback_api_version=mqtt_client.CallbackAPIVersion.VERSION2,
+        self._socket_path = read_str_parameter(
+            self, "unix_socket_path", unix_socket_protocol.DEFAULT_SOCKET_PATH
         )
 
-        self.mqtt_client.on_connect = self.on_connect_mqtt
-        self.mqtt_client.on_message = self.on_message_mqtt
-        self.mqtt_client.on_disconnect = self.on_disconnect_mqtt
+        self._sock = None
+        self._sock_lock = threading.Lock()
+        self._stop = threading.Event()
 
-        if mqtt_username or mqtt_tls_client_cert:
-            # create_default_context loads system CAs automatically (handles Let's Encrypt)
-            context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-
-            # Prefer TLS 1.3 when available
-            if hasattr(ssl, "TLSVersion"):
-                try:
-                    context.minimum_version = ssl.TLSVersion.TLSv1_3
-                    context.maximum_version = ssl.TLSVersion.TLSv1_3
-                except Exception:
-                    pass
-
-            # Override CA bundle if explicitly provided (ROS param takes priority over env var)
-            ca_path = mqtt_tls_ca_cert or os.getenv("VDA5050_CONNECTOR_TLS_CA_CERT", "")
-            if ca_path:
-                context.load_verify_locations(cafile=ca_path)
-
-            # Load client cert/key for mTLS (ROS params take priority over env vars)
-            cert_file = mqtt_tls_client_cert or os.getenv("VDA5050_CONNECTOR_TLS_CLIENT_CERT", "")
-            key_file = mqtt_tls_client_key or os.getenv("VDA5050_CONNECTOR_TLS_CLIENT_KEY", "")
-            if cert_file and key_file:
-                context.load_cert_chain(certfile=cert_file, keyfile=key_file)
-            else:
-                self.logger.warn(
-                    "mTLS: no client cert/key configured — broker will reject the connection. "
-                    "Set mqtt_tls_client_cert and mqtt_tls_client_key parameters."
-                )
-
-            self.mqtt_client.tls_set_context(context)
-
-            if mqtt_username:
-                self.mqtt_client.username_pw_set(
-                    username=mqtt_username, password=mqtt_password
-                )
-
-        # Configure will message or last testament message
-        will_topic = get_vda5050_mqtt_topic(
-            manufacturer=self._manufacturer_name,
-            serial_number=self._serial_number,
-            topic="connection",
-            major_version=self.vda5050_version_alias,
-            interface_name=self._interface_name
-        )
-
-        # NOTE: will payload cannot be set dynamically or updated
-        # without reconnecting, so some values are fixed. For the
-        # timestamp, instead of using the time the connector started
-        # the ts 0 is used which is easy to identify.
-        will_payload = convert_ros_message_to_json(
-            VDAConnection(
-                header_id=0,
-                version=self.vda5050_version,
-                timestamp="1970-01-01T12:00:00.00Z",
-                manufacturer=self._manufacturer_name,
-                serial_number=self._serial_number,
-                connection_state=VDAConnection.CONNECTIONBROKEN,
-            )
-        )
-        self.mqtt_client.will_set(
-            topic=will_topic, payload=will_payload, qos=1, retain=True
-        )
-
-        # Keep a copy of the last VDA5050 Connection message
-        self._last_connection_msg = None
-
-        # Connect to MQTT broker
-        self._mqtt_address = mqtt_address
-        self._mqtt_port = int(mqtt_port)
-        self._connect_to_broker()
-
-        self.mqtt_client.loop_start()
-
+        self._connect_to_mqtt_client()
         self._connect_timer = self.create_timer(
             timer_period_sec=5.0,
-            callback=self._connect_to_broker
+            callback=self._connect_to_mqtt_client,
         )
 
         self.on_configure()
 
         self.logger.info(f"Node {NODE_NAME} has started successfully.")
 
-    def _connect_to_broker(self):
-        """Attempts to connect to the MQTT broker."""
-        if not self.mqtt_client.is_connected():
+    # ── Unix socket client (connects to mqtt_client_daemon) ─────────────
+    def _connect_to_mqtt_client(self):
+        with self._sock_lock:
+            if self._sock is not None:
+                return
             try:
-                self.mqtt_client.connect_async(host=self._mqtt_address, port=self._mqtt_port)
-                self.logger.info(f"Attempting to connect to MQTT broker at {self._mqtt_address}:{self._mqtt_port}...")
-            except Exception as e:
-                self.logger.error(f"Error during connection attempt: {e}. Will retry again.")
-                pass
-
-    def on_connect_mqtt(self, client, userdata, connect_flags, reason_code, properties):
-        """MQTT client connect callback."""
-        if reason_code == 0:
-            self.logger.info("Connected to MQTT Broker!")
-
-            # Cancel the connection timer
-            if hasattr(self, '_connect_timer'):
-                self._connect_timer.cancel()
-
-            self.mqtt_client.subscribe(
-                get_vda5050_mqtt_topic(
-                    manufacturer=self._manufacturer_name,
-                    serial_number=self._serial_number,
-                    topic="order",
-                    major_version=self.vda5050_version_alias,
-                    interface_name=self._interface_name
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                sock.connect(self._socket_path)
+                self._sock = sock
+                self.logger.info(f"Connected to mqtt_client_daemon at {self._socket_path}")
+            except OSError as e:
+                self.logger.info(
+                    f"Attempting to connect to mqtt_client_daemon at {self._socket_path}... ({e})"
                 )
-            )
-            self.mqtt_client.subscribe(
-                get_vda5050_mqtt_topic(
-                    manufacturer=self._manufacturer_name,
-                    serial_number=self._serial_number,
-                    topic="instantActions",
-                    major_version=self.vda5050_version_alias,
-                    interface_name=self._interface_name
-                )
-            )
-            self._publish_connection(
-                msg=VDAConnection(
-                    header_id=0,
-                    version=self.vda5050_version,
-                    timestamp=get_vda5050_ts(),
-                    manufacturer=self._manufacturer_name,
-                    serial_number=self._serial_number,
-                    connection_state=VDAConnection.ONLINE,
-                )
-            )
+                return
 
-        else:
-            self.logger.error(f"Failed to connect, return code {reason_code}\n")
+        reader = threading.Thread(target=self._ipc_read_loop, args=(sock,), daemon=True)
+        reader.start()
 
-    def on_message_mqtt(self, client, userdata, msg):
-        """MQTT client message callback."""
-        try:
-            msg_json = json_camel_to_snake_case(msg.payload)
-            self.logger.debug(f"Received '{msg_json}' from '{msg.topic}' topic")
-        except json.decoder.JSONDecodeError:
-            self.logger.error(f"Failed to decode message: '{msg.payload}'")
-            return
+    def _ipc_read_loop(self, sock):
+        sock.settimeout(1.0)
+        while not self._stop.is_set():
+            try:
+                frame = unix_socket_protocol.recv_frame(sock)
+            except socket.timeout:
+                continue
+            except (ConnectionError, OSError, ValueError, json.JSONDecodeError) as e:
+                self.logger.info(f"Lost connection to mqtt_client_daemon ({e}). Will reconnect.")
+                break
 
-        try:
-            if msg.topic.endswith("order"):
-                vda_order_msg = VDAOrder(**generate_vda_order_msg(msg_json))
-                self._order_pub.publish(msg=vda_order_msg)
-            if msg.topic.endswith("instantActions"):
-                vda_instant_actions_message = VDAInstantActions(
-                    **generate_vda_instant_action_msg(msg_json)
-                )
-                self._instant_actions_pub.publish(msg=vda_instant_actions_message)
-        except KeyError as ex:
-            self.logger.warn(f"Ignoring invalid VDA5050 message: {ex}.")
-            return
+            topic_type = frame.get("topic_type")
+            payload = frame.get("payload")
+            if payload is None:
+                continue
+            try:
+                self._handle_daemon_frame(topic_type, payload)
+            except KeyError as ex:
+                self.logger.warn(f"Ignoring invalid VDA5050 message: {ex}.")
 
-    def on_disconnect_mqtt(self, client, userdata, disconnect_flags, reason_code, properties):
-        """MQTT client disconnect callback using paho v2 signature."""
-        if reason_code != 0:
-            self.logger.info(
-                f"MQTT client disconnected (rc: {reason_code}, {error_string(reason_code.value)}). Trying to reconnect."
+        with self._sock_lock:
+            if self._sock is sock:
+                self._sock = None
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+    def _handle_daemon_frame(self, topic_type, payload_json):
+        msg_json = json_camel_to_snake_case(payload_json)
+        self.logger.debug(f"Received '{msg_json}' for topic_type '{topic_type}'")
+
+        if topic_type == "order":
+            vda_order_msg = VDAOrder(**generate_vda_order_msg(msg_json))
+            self._order_pub.publish(msg=vda_order_msg)
+        elif topic_type == "instantActions":
+            vda_instant_actions_message = VDAInstantActions(
+                **generate_vda_instant_action_msg(msg_json)
             )
-            if hasattr(self, '_connect_timer'):
-                self._connect_timer.reset()
-        else:
-            self.logger.info("Disconnected from MQTT Broker!")
+            self._instant_actions_pub.publish(msg=vda_instant_actions_message)
+
+    def _send_to_mqtt_client(self, topic_type, payload_json):
+        with self._sock_lock:
+            sock = self._sock
+            if sock is None:
+                self.logger.debug(f"Not connected to mqtt_client_daemon — dropping {topic_type} frame")
+                return
+            try:
+                unix_socket_protocol.send_frame(sock, topic_type, payload_json)
+            except OSError as e:
+                self.logger.warn(f"IPC send failed ({e}), will reconnect")
+                self._sock = None
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     def on_configure(self):
         """
         Subscribe to relevant ROS2 topics.
 
         This method registers callbacks for translating
-        ROS2 messages to VDA5050 MQTT messages.
+        ROS2 messages to VDA5050 MQTT messages transmitted to mqtt_client.
         """
         self.logger.info("Configuring ROS topics")
         self._state_sub = self.create_subscription(
@@ -508,116 +379,32 @@ class MQTTBridge(Node):
         self.logger.info("Finished configuring ROS topics")
 
     def on_shutdown(self):
-        """Perform all necessary teardown steps."""
-        self.logger.info("Publishing offline Connection message")
-
-        offline_message = VDAConnection(
-            header_id=0,
-            version=self.vda5050_version,
-            timestamp=get_vda5050_ts(),
-            manufacturer=self._manufacturer_name,
-            serial_number=self._serial_number,
-            connection_state=VDAConnection.OFFLINE,
-        )
-
-        # Use the latest Connection message `header_id` if available
-        if self._last_connection_msg:
-            offline_message.header_id = self._last_connection_msg.header_id + 1
-
-        self._publish_connection(msg=offline_message)
-
-        self.logger.info("Unsubscribing from MQTT topics")
-        self.mqtt_client.unsubscribe(
-            get_vda5050_mqtt_topic(
-                manufacturer=self._manufacturer_name,
-                serial_number=self._serial_number,
-                topic="order",
-                major_version=self.vda5050_version_alias,
-                interface_name=self._interface_name
-            )
-        )
-        self.mqtt_client.unsubscribe(
-            get_vda5050_mqtt_topic(
-                manufacturer=self._manufacturer_name,
-                serial_number=self._serial_number,
-                topic="instantActions",
-                major_version=self.vda5050_version_alias,
-                interface_name=self._interface_name
-            )
-        )
-
-        self.mqtt_client.disconnect()
-
-    def _publish_to_topic(self, msg, topic):
         """
-        Publish a ROS2 message to an MQTT topic.
+        Perform all necessary teardown steps.
 
-        Args:
-        ----
-            msg (Any): VDA5050 ROS2 message.
-            topic (str): topic for publishing the VDA5050 MQTT message.
-
+        Closing the IPC socket is enough — mqtt_client_daemon detects the
+        disconnect and publishes the VDA5050 OFFLINE connection state on
+        this robot's behalf (see MqttClientDaemon._close_ipc_locked). The
+        two processes no longer share a lifetime, so the daemon — not this
+        node — is responsible for that safety net now.
         """
-        json_msg = convert_ros_message_to_json(msg)
-        self.logger.debug(f"Publishing MQTT message to topic {topic}: {json_msg}")
-        self.mqtt_client.publish(topic, json_msg)
+        self.logger.info("Closing connection to mqtt_client_daemon")
+        self._stop.set()
+        if hasattr(self, '_connect_timer'):
+            self._connect_timer.cancel()
+        with self._sock_lock:
+            if self._sock is not None:
+                try:
+                    self._sock.close()
+                except OSError:
+                    pass
+                self._sock = None
 
     def _publish_state(self, msg: VDAOrderState):
-        """
-        Publish ROS2 OrderState message to the corresponding VDA5050 MQTT topic.
-
-        Args:
-        ----
-            msg (VDAOrderState): VDA5050 ROS2 OrderState message.
-
-        """
-        topic = get_vda5050_mqtt_topic(
-            manufacturer=self._manufacturer_name,
-            serial_number=self._serial_number,
-            topic="state",
-            major_version=self.vda5050_version_alias,
-            interface_name=self._interface_name
-        )
-        self._publish_to_topic(msg, topic)
+        self._send_to_mqtt_client("state", convert_ros_message_to_json(msg))
 
     def _publish_connection(self, msg: VDAConnection):
-        """
-        Publish VDA5050 ROS2 Connection message to the corresponding VDA5050 MQTT topic.
-
-        Also updates a local copy of the last published VDA5050 Connection message to keep track
-        of the latest ``header_id`` field. This is used to publish an offline Connection message
-        when tearing down the node.
-
-        Args:
-        ----
-            msg (VDAConnection): VDA5050 ROS2 Connection message.
-
-        """
-        # Update the last connection message
-        self._last_connection_msg = msg
-        topic = get_vda5050_mqtt_topic(
-            manufacturer=self._manufacturer_name,
-            serial_number=self._serial_number,
-            topic="connection",
-            major_version=self.vda5050_version_alias,
-            interface_name=self._interface_name
-        )
-        self._publish_to_topic(msg, topic)
+        self._send_to_mqtt_client("connection", convert_ros_message_to_json(msg))
 
     def _publish_visualization(self, msg: VDAVisualization):
-        """
-        Publish ROS2 Visualization message to the corresponding VDA5050 MQTT topic.
-
-        Args:
-        ----
-            msg (VDAVisualization): VDA5050 ROS2 Visualization message.
-
-        """
-        topic = get_vda5050_mqtt_topic(
-            manufacturer=self._manufacturer_name,
-            serial_number=self._serial_number,
-            topic="visualization",
-            major_version=self.vda5050_version_alias,
-            interface_name=self._interface_name
-        )
-        self._publish_to_topic(msg, topic)
+        self._send_to_mqtt_client("visualization", convert_ros_message_to_json(msg))

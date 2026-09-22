@@ -30,13 +30,19 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 # Various common utility functions.
+#
+# Split 2026-09-18 (cybersecurity/issues/01): this module must stay free of
+# any rclpy import. mqtt_client_daemon.py (deliberately not a ROS2 node —
+# see its docstring for why) imports get_vda5050_mqtt_topic and
+# json_camel_to_snake_case from here; if this file ever imports rclpy again
+# (even just for a type hint), that daemon breaks, because Python executes
+# a module's top-level imports regardless of which names are actually used.
+# The parameter-reading helpers that genuinely need a live rclpy Node moved
+# to ros_utils.py.
 
 from datetime import datetime
 import re
 import json
-from rclpy.node import Node
-from rcl_interfaces.msg import ParameterDescriptor
-from rcl_interfaces.msg import ParameterType
 from rosidl_runtime_py import message_to_ordereddict
 
 
@@ -56,61 +62,6 @@ def get_vda5050_ts():
     ts = d.isoformat()
     ts = ts[:-3]
     return f"{ts}Z"
-
-
-def read_bool_parameter(node: Node, param_name: str, alternative: bool) -> bool:
-    """Declare and read a bool parameter."""
-    node.declare_parameter(
-        param_name,
-        descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_BOOL),
-        value=alternative,
-    )
-    param = node.get_parameter(param_name)
-    return param if type(param) == bool else param.get_parameter_value().bool_value
-
-
-def read_str_parameter(node: Node, param_name: str, alternative: str) -> str:
-    """Declare and read a string parameter."""
-    node.declare_parameter(
-        param_name,
-        descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_STRING),
-        value=alternative,
-    )
-    param = node.get_parameter(param_name)
-    return param if type(param) == str else param.get_parameter_value().string_value
-
-
-def read_int_parameter(node: Node, param_name: str, alternative: int) -> int:
-    """Declare and read a int parameter."""
-    node.declare_parameter(
-        param_name,
-        descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_INTEGER),
-        value=alternative,
-    )
-    param = node.get_parameter(param_name)
-    return param if type(param) == int else param.get_parameter_value().integer_value
-
-
-def read_double_parameter(node: Node, param_name: str, alternative: float) -> float:
-    """Declare and read a double (float) parameter."""
-    node.declare_parameter(
-        param_name,
-        descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_DOUBLE),
-        value=alternative,
-    )
-    param = node.get_parameter(param_name)
-    return param if type(param) == float else param.get_parameter_value().double_value
-
-
-def read_str_array_parameter(node: Node, param_name: str, alternative: list) -> list:
-    """Declare and read a string array parameter."""
-    node.declare_parameter(
-        param_name,
-        descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_STRING_ARRAY),
-        value=alternative,
-    )
-    param = node.get_parameter(param_name)
-    return param if type(param) == list else param.get_parameter_value().string_array_value
 
 
 def json_camel_to_snake_case(s):

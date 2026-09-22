@@ -88,6 +88,7 @@ ament_python_install_package(${PROJECT_NAME}_py)
 install(PROGRAMS
   scripts/mqtt_bridge.py
   scripts/vda5050_controller.py
+  scripts/mqtt_client.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

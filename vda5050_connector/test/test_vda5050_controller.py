@@ -885,3 +885,13 @@ def test_state_is_published_on_receiving_instant_actions(mocker, controller_node
     node.process_instant_actions(_instant_actions(("cancel-1", "cancelOrder")))
 
     spy_publish_state.assert_called()
+
+
+def test_repeated_action_id_within_one_message_is_ignored(controller_node):
+    node = controller_node
+
+    node.process_instant_actions(_instant_actions(
+        ("cancel-1", "cancelOrder"), ("cancel-1", "cancelOrder"),
+    ))
+
+    assert _reported_action_ids(node).count("cancel-1") == 1

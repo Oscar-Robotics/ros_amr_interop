@@ -97,6 +97,7 @@ DEFAULT_SERIAL_NUMBER = "robot_1"
 DEFAULT_PROTOCOL_VERSION = "2.0.0"
 DEFAULT_STARTING_NODE_ID = ""
 SUPPORTED_PROTOCOL_VERSIONS = ["1.1.0", "2.0.0"]
+CANCEL_ORDER = "cancelOrder"
 DEFAULT_INTERFACE_NAME = "vda5050"
 
 DEFAULT_GET_STATE_SVC_NAME = "adapter/get_state"
@@ -716,6 +717,7 @@ class VDA5050Controller(Node):
             if action.action_id in known_action_ids:
                 self.logger.warn(f"Ignoring action '{action.action_id}': already received.")
                 continue
+            known_action_ids.add(action.action_id)
             self.logger.info(
                 f"Processing action '{action.action_id}' of type '{action.action_type}'"
             )
@@ -731,7 +733,7 @@ class VDA5050Controller(Node):
                 {"action_states": self._current_state.action_states + [action_state]}
             )
 
-            if action.action_type == "cancelOrder":
+            if action.action_type == CANCEL_ORDER:
                 if self._canceling_order():
                     self._join_running_cancel(action)
                 else:
@@ -932,17 +934,16 @@ class VDA5050Controller(Node):
                 self._publish_state()
                 return
 
-            match_last_new_base_nodes = update_id_diff > 0 and self._match_stitch_nodes(order)
-            if not match_last_new_base_nodes:
-                # Reject if update id is lower or if last and new base nodes doesn't match
+            if update_id_diff < 0:
+                error_description = (
+                    f"New update id {order.order_update_id} lower than old update id"
+                    f" {self._current_order.order_update_id}"
+                )
+                reject_error = OrderRejectErrors.ORDER_UPDATE_ERROR
+            elif not self._match_stitch_nodes(order):
                 error_description = (
                     f"New base start node [{order.nodes[0].node_id}] doesn't match with old base"
                     f" last node [{self._current_order.nodes[-1].node_id}]"
-                    if update_id_diff > 0
-                    else (
-                        f"New update id {order.order_update_id} lower than old update id"
-                        f" {self._current_order.order_update_id}"
-                    )
                 )
                 reject_error = OrderRejectErrors.ORDER_UPDATE_ERROR
             else:
@@ -984,14 +985,8 @@ class VDA5050Controller(Node):
             True if there is an active order, False otherwise.
 
         """
-        has_running_actions = any(
-            [
-                action_state.action_status
-                not in [VDACurrentAction.FINISHED, VDACurrentAction.FAILED]
-                for action_state in self._current_state.action_states
-                if action_state.action_type != "cancelOrder"
-            ]
-        )
+        running_actions = self._running_order_actions()
+        has_running_actions = bool(running_actions)
 
         # If there are no actions, but there are node / edge states, there is an active order
         has_nodes_and_edges = (
@@ -1006,14 +1001,6 @@ class VDA5050Controller(Node):
             ), throttle_duration_sec=5)
 
         if has_running_actions:
-            running_actions = [
-                action_state
-                for action_state in self._current_state.action_states
-                if action_state.action_type != "cancelOrder" and
-                action_state.action_status not in [
-                    VDACurrentAction.FINISHED, VDACurrentAction.FAILED
-                ]
-            ]
             self.logger.debug((
                 "Found running actions while validating if there's an active order."
                 f" Actions: {running_actions}"
@@ -1368,6 +1355,15 @@ class VDA5050Controller(Node):
         self._current_node_actions = []
 
         self.logger.info("Finished executing cancelOrder.")
+
+    def _running_order_actions(self) -> list:
+        """Unfinished action states that belong to an order (cancelOrder excluded)."""
+        return [
+            action_state
+            for action_state in self._current_state.action_states
+            if action_state.action_type != CANCEL_ORDER
+            and action_state.action_status not in [VDACurrentAction.FINISHED, VDACurrentAction.FAILED]
+        ]
 
     def _join_running_cancel(self, action: VDAAction):
         """Complete a cancelOrder received while another runs together with it."""

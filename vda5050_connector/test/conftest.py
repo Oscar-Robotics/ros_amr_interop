@@ -156,7 +156,9 @@ def setup_rclpy():
 
 @pytest.fixture
 def adapter_node(setup_rclpy):
-    return rclpy.create_node("FakeAdapter")
+    node = rclpy.create_node("FakeAdapter")
+    yield node
+    node.destroy_node()
 
 
 @pytest.fixture

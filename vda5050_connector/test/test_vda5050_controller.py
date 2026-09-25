@@ -38,6 +38,7 @@ from uuid import uuid4
 from vda5050_connector_py.vda5050_controller import OrderAcceptModes
 from vda5050_connector_py.vda5050_controller import OrderRejectErrors
 from vda5050_connector_py.utils import get_vda5050_ts
+from action_msgs.msg import GoalStatus
 from vda5050_connector.action import NavigateToNode
 from vda5050_connector.srv import GetState
 
@@ -49,6 +50,14 @@ from vda5050_msgs.msg import Edge
 from vda5050_msgs.msg import NodePosition
 from vda5050_msgs.msg import Action
 from vda5050_msgs.msg import ActionParameter
+from vda5050_msgs.msg import InstantActions
+
+
+def _navigation_succeeded():
+    """What the navigate-to-node action client's result future resolves to."""
+    return NavigateToNode.Impl.GetResultService.Response(
+        status=GoalStatus.STATUS_SUCCEEDED, result=NavigateToNode.Result()
+    )
 
 
 def get_order_new(order_id=str(uuid4()), order_update_id=0):
@@ -418,7 +427,7 @@ def test_vda5050_controller_node_new_order(
 
     # Future for invoking adapter navigation goal result callback
     future = Future()
-    future.set_result(result=NavigateToNode.Result())
+    future.set_result(result=_navigation_succeeded())
 
     spy_send_adapter_navigate_to_node.reset_mock()
     # Simulate the adapter reached navigation goal
@@ -498,7 +507,7 @@ def test_vda5050_controller_node_update_order(
 
     # Simulate the adapter reached navigation goals
     future = Future()
-    future.set_result(result=NavigateToNode.Result())
+    future.set_result(result=_navigation_succeeded())
 
     # The NEW order contains 5 nodes and 4 edges. The first node (in deviation range)
     # is processed and remove, and 4 nodes are send to navigate to.
@@ -545,7 +554,7 @@ def test_vda5050_controller_node_update_order(
 
     # Future for invoking adapter navigation goal result callback
     future = Future()
-    future.set_result(result=NavigateToNode.Result())
+    future.set_result(result=_navigation_succeeded())
 
     # Simulate the adapter reached navigation goal
     node._navigate_to_node_result_callback(future)
@@ -580,7 +589,7 @@ def test_vda5050_controller_node_stitch_order(
 
     # Simulate the adapter reached navigation goals
     future = Future()
-    future.set_result(result=NavigateToNode.Result())
+    future.set_result(result=_navigation_succeeded())
 
     # The base order contains 2 nodes and 1 edge. The first node (in deviation range)
     # is processed and removed, and 1 node is sent to navigate to.
@@ -636,7 +645,7 @@ def test_vda5050_controller_node_reject_order(
 
     # Simulate the adapter reached navigation goals
     future = Future()
-    future.set_result(result=NavigateToNode.Result())
+    future.set_result(result=_navigation_succeeded())
 
     # The NEW order contains 5 nodes and 4 edges. The first node (in deviation range)
     # is processed and remove, and 4 nodes are send to navigate to.
@@ -741,3 +750,138 @@ def test_publish_visualization_never_blocks_the_node(
 
     mock_call.assert_not_called()
     mock_call_async.assert_called_once()
+
+
+# ---- Messages resent by master control over a lossy link ----
+
+def _instant_actions(*actions):
+    return InstantActions(
+        header_id=0,
+        timestamp=get_vda5050_ts(),
+        version="2.0.0",
+        manufacturer="MANUFACTURER",
+        serial_number="SERIAL_NUMBER",
+        actions=[
+            Action(action_id=action_id, action_type=action_type, blocking_type="HARD")
+            for action_id, action_type in actions
+        ],
+    )
+
+
+def _reported_action_ids(node):
+    return [a.action_id for a in node._current_state.action_states]
+
+
+def test_instant_action_with_a_known_action_id_is_ignored(controller_node):
+    node = controller_node
+    node.process_instant_actions(_instant_actions(("cancel-1", "cancelOrder")))
+    node._on_active_order()
+
+    node.process_instant_actions(_instant_actions(("cancel-1", "cancelOrder")))
+    node._on_active_order()
+
+    assert _reported_action_ids(node).count("cancel-1") == 1
+
+
+def _navigation_cancelled():
+    return NavigateToNode.Impl.GetResultService.Response(
+        status=GoalStatus.STATUS_CANCELED, result=NavigateToNode.Result()
+    )
+
+
+def _action_status(node, action_id):
+    return [a.action_status for a in node._current_state.action_states if a.action_id == action_id]
+
+
+def test_cancel_received_while_another_cancel_runs_completes_with_it(
+    adapter_node,
+    controller_node,
+):
+    node = controller_node
+    node.process_order(get_order_new(str(uuid4())))
+    for _ in range(10):
+        if node._is_navigation_active():
+            break
+        rclpy.spin_once(node, timeout_sec=0.1)
+        rclpy.spin_once(adapter_node, timeout_sec=0.1)
+    assert node._is_navigation_active()
+
+    node.process_instant_actions(_instant_actions(("cancel-1", "cancelOrder")))
+    node._on_active_order()
+    node.process_instant_actions(_instant_actions(("cancel-2", "cancelOrder")))
+    future = Future()
+    future.set_result(result=_navigation_cancelled())
+    node._navigate_to_node_result_callback(future)
+    node._on_active_order()
+
+    assert _action_status(node, "cancel-1") == ["FINISHED"]
+    assert _action_status(node, "cancel-2") == ["FINISHED"]
+    assert not node._has_current_order()
+
+
+def _drive_new_order_to_its_end(node, adapter_node, order_id):
+    node.process_order(get_order_new(order_id))
+    rclpy.spin_once(node)
+    rclpy.spin_once(adapter_node)
+    future = Future()
+    future.set_result(result=_navigation_succeeded())
+    for _ in range(4):
+        node._navigate_to_node_result_callback(future)
+        node._on_active_order()
+
+
+def test_order_update_keeps_the_reported_action_states(adapter_node, controller_node):
+    node = controller_node
+    order_id = str(uuid4())
+    _drive_new_order_to_its_end(node, adapter_node, order_id)
+    node.process_instant_actions(_instant_actions(("cancel-1", "cancelOrder")))
+    node._on_active_order()
+
+    node.process_order(get_order_update(order_id, 1))
+
+    assert "cancel-1" in _reported_action_ids(node)
+
+
+def test_duplicate_order_is_discarded_before_stitch_validation(mocker, adapter_node, controller_node):
+    node = controller_node
+    order_id = str(uuid4())
+    _drive_new_order_to_its_end(node, adapter_node, order_id)
+    node.process_order(get_order_update(order_id, 1))
+    spy_match_stitch_nodes = mocker.spy(node, "_match_stitch_nodes")
+    spy_reject_order = mocker.spy(node, "_reject_order")
+
+    node.process_order(get_order_update(order_id, 1))
+
+    spy_match_stitch_nodes.assert_not_called()
+    spy_reject_order.assert_not_called()
+    assert node._current_state.order_update_id == 1
+
+
+def test_state_is_published_on_receiving_an_order(mocker, controller_node):
+    node = controller_node
+    spy_publish_state = mocker.spy(node, "_publish_state")
+
+    node.process_order(get_order_new(str(uuid4())))
+
+    spy_publish_state.assert_called()
+
+
+def test_state_is_published_on_receiving_a_duplicate_order(mocker, adapter_node, controller_node):
+    node = controller_node
+    order_id = str(uuid4())
+    _drive_new_order_to_its_end(node, adapter_node, order_id)
+    node.process_order(get_order_update(order_id, 1))
+    spy_publish_state = mocker.spy(node, "_publish_state")
+
+    node.process_order(get_order_update(order_id, 1))
+
+    spy_publish_state.assert_called()
+
+
+def test_state_is_published_on_receiving_instant_actions(mocker, controller_node):
+    node = controller_node
+    spy_publish_state = mocker.spy(node, "_publish_state")
+
+    node.process_instant_actions(_instant_actions(("cancel-1", "cancelOrder")))
+
+    spy_publish_state.assert_called()

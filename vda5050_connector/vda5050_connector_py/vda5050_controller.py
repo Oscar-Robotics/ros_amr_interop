@@ -152,6 +152,7 @@ class VDA5050Controller(Node):
         self._read_parameters()
 
         self._cancel_action = None
+        self._joined_cancel_action_ids = []
         self._current_node_actions = []
         self._current_node_goal = None
         self._current_order = VDAOrder(order_id="-1")
@@ -710,7 +711,11 @@ class VDA5050Controller(Node):
         header_id = instant_actions.header_id
         self.logger.info(f"Received instant_actions msg with id: '{header_id}'")
 
+        known_action_ids = {a.action_id for a in self._current_state.action_states}
         for action in instant_actions.actions:
+            if action.action_id in known_action_ids:
+                self.logger.warn(f"Ignoring action '{action.action_id}': already received.")
+                continue
             self.logger.info(
                 f"Processing action '{action.action_id}' of type '{action.action_type}'"
             )
@@ -727,7 +732,10 @@ class VDA5050Controller(Node):
             )
 
             if action.action_type == "cancelOrder":
-                self._cancel_action = action
+                if self._canceling_order():
+                    self._join_running_cancel(action)
+                else:
+                    self._cancel_action = action
                 continue
             elif action.action_type == "stateRequest":
                 self._update_action_status(action.action_id, VDACurrentAction.RUNNING)
@@ -741,6 +749,8 @@ class VDA5050Controller(Node):
                 continue
 
             self.send_adapter_process_vda_action(action)
+
+        self._publish_state()
 
     def instant_action_msg_is_valid(self, instant_actions: VDAInstantActions):
         """
@@ -916,18 +926,19 @@ class VDA5050Controller(Node):
         else:
             # Same order graph (Same order_id)
             update_id_diff = order.order_update_id - self._current_order.order_update_id
-            match_last_new_base_nodes = self._match_stitch_nodes(order)
-
             if update_id_diff == 0:
-                # Same update id, discard the msg
+                # Resent by master control, which has not seen it in the state yet (§6.6.4.3)
                 self.logger.info(f"Order [{order.order_id}] discarded. Same order update id.")
+                self._publish_state()
                 return
-            elif update_id_diff < 0 or not match_last_new_base_nodes:
+
+            match_last_new_base_nodes = update_id_diff > 0 and self._match_stitch_nodes(order)
+            if not match_last_new_base_nodes:
                 # Reject if update id is lower or if last and new base nodes doesn't match
                 error_description = (
                     f"New base start node [{order.nodes[0].node_id}] doesn't match with old base"
                     f" last node [{self._current_order.nodes[-1].node_id}]"
-                    if not match_last_new_base_nodes
+                    if update_id_diff > 0
                     else (
                         f"New update id {order.order_update_id} lower than old update id"
                         f" {self._current_order.order_update_id}"
@@ -944,6 +955,7 @@ class VDA5050Controller(Node):
             self._reject_order(order=order, error=reject_error, description=error_description)
         else:
             self._accept_order(order=order, mode=accept_mode)
+            self._publish_state()
 
     def order_msg_is_valid(self, order: VDAOrder):
         """
@@ -972,17 +984,12 @@ class VDA5050Controller(Node):
             True if there is an active order, False otherwise.
 
         """
-        # Dont take care of cancelOrder action when evaluating if there is an active order
-        action_id_cancel = -1
-        if self._canceling_order():
-            action_id_cancel = self._cancel_action.action_id
-
         has_running_actions = any(
             [
                 action_state.action_status
                 not in [VDACurrentAction.FINISHED, VDACurrentAction.FAILED]
                 for action_state in self._current_state.action_states
-                if action_state.action_id != action_id_cancel
+                if action_state.action_type != "cancelOrder"
             ]
         )
 
@@ -1002,7 +1009,7 @@ class VDA5050Controller(Node):
             running_actions = [
                 action_state
                 for action_state in self._current_state.action_states
-                if action_state.action_id != action_id_cancel and
+                if action_state.action_type != "cancelOrder" and
                 action_state.action_status not in [
                     VDACurrentAction.FINISHED, VDACurrentAction.FAILED
                 ]
@@ -1214,7 +1221,7 @@ class VDA5050Controller(Node):
                 + self._get_node_states(order),
                 "edge_states": (mode == OrderAcceptModes.STITCH) * self._current_state.edge_states
                 + self._get_edge_states(order),
-                "action_states": self._current_state.action_states[:-len(order.nodes[0].actions)]
+                "action_states": self._action_states_without_stitch_node_actions(order)
                 + self._get_action_states(order),
                 "new_base_request": False,
             }
@@ -1225,6 +1232,14 @@ class VDA5050Controller(Node):
             # Note: the standard assumes the robot is at the first node of the order.
             # Otherwise, the order gets rejected and this method is not called.
             self._process_node(self._current_order.nodes[0])
+
+    def _action_states_without_stitch_node_actions(self, order: VDAOrder) -> list:
+        """Current action states minus those of the stitch node, which the
+        new order carries again."""
+        stitch_node_action_count = len(order.nodes[0].actions)
+        if stitch_node_action_count == 0:
+            return self._current_state.action_states
+        return self._current_state.action_states[:-stitch_node_action_count]
 
     def _reject_order(self, order: VDAOrder, error: OrderRejectErrors, description: str = ""):
         """
@@ -1289,7 +1304,7 @@ class VDA5050Controller(Node):
             self.logger.error(
                 "cancelOrder action request failed. There is no active order running."
             )
-            self._update_action_status(self._cancel_action.action_id, VDACurrentAction.FAILED)
+            self._finish_cancel_actions(VDACurrentAction.FAILED)
             # The AGV must report a “noOrderToCancel” error with the errorLevel set to warning.
             # The actionId of the instantAction must be passed as an errorReference.
             error = VDAError()
@@ -1346,13 +1361,24 @@ class VDA5050Controller(Node):
                 "edge_states": [],
             }
         )
-        self._update_action_status(self._cancel_action.action_id, VDACurrentAction.FINISHED)
+        self._finish_cancel_actions(VDACurrentAction.FINISHED)
         self._current_order = VDAOrder(order_id="-1")
         self._cancel_action = None
         self._current_node_goal = None
         self._current_node_actions = []
 
         self.logger.info("Finished executing cancelOrder.")
+
+    def _join_running_cancel(self, action: VDAAction):
+        """Complete a cancelOrder received while another runs together with it."""
+        self.logger.info(f"cancelOrder '{action.action_id}' joins the running cancel.")
+        self._update_action_status(action.action_id, VDACurrentAction.RUNNING)
+        self._joined_cancel_action_ids.append(action.action_id)
+
+    def _finish_cancel_actions(self, action_status: str):
+        for action_id in [self._cancel_action.action_id] + self._joined_cancel_action_ids:
+            self._update_action_status(action_id, action_status)
+        self._joined_cancel_action_ids = []
 
     def _canceling_order(self) -> bool:
         """

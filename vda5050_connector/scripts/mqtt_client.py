@@ -43,6 +43,7 @@ Configuration is via environment variables:
 
   MQTT_ADDRESS, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD
   MQTT_KEEPALIVE (seconds, default 10)
+  MQTT_TCP_USER_TIMEOUT_MS (default 5000; 0 disables): drop the connection when sent data stays unacknowledged
   USE_ENCRYPTION (0/1), MQTT_TLS_CA_CERT, MQTT_TLS_CLIENT_CERT, MQTT_TLS_CLIENT_KEY
   VDA5050_PROTOCOL_VERSION (default 2.0.0)
   MANUFACTURER_NAME, SERIAL_NUMBER, INTERFACE_NAME (default vda5050)
@@ -137,6 +138,9 @@ class MQTTClient:
         self._mqtt_port = int(_env("MQTT_PORT", "8883"))
         # Dead link detected in 1-2x keepalive client-side, 1.5x broker-side.
         self._mqtt_keepalive = int(_env("MQTT_KEEPALIVE", "10"))
+        # The robot publishes continuously, so a dead flow is caught ~this long after it dies,
+        # sooner than keepalive, which only pings after a quiet period.
+        self._tcp_user_timeout_ms = int(_env("MQTT_TCP_USER_TIMEOUT_MS", "5000"))
         mqtt_username = _env("MQTT_USERNAME", "")
         mqtt_password = _env("MQTT_PASSWORD", "")
 
@@ -160,6 +164,7 @@ class MQTTClient:
         self.mqtt_client.on_connect = self._on_connect_mqtt
         self.mqtt_client.on_message = self._on_message_mqtt
         self.mqtt_client.on_disconnect = self._on_disconnect_mqtt
+        self.mqtt_client.on_socket_open = self._on_socket_open_mqtt
         self.mqtt_client.reconnect_delay_set(
             min_delay=RECONNECT_MIN_DELAY_S, max_delay=RECONNECT_MAX_DELAY_S
         )
@@ -227,7 +232,7 @@ class MQTTClient:
         )
         log.info(
             f"Connecting to MQTT broker at {self._mqtt_address}:{self._mqtt_port} "
-            f"(keepalive={self._mqtt_keepalive}s)..."
+            f"(keepalive={self._mqtt_keepalive}s, tcp_user_timeout={self._tcp_user_timeout_ms}ms)..."
         )
 
     def _on_connect_mqtt(self, client, userdata, connect_flags, reason_code, properties):
@@ -250,6 +255,11 @@ class MQTTClient:
                 )
             )
         self._publish_connection_state("ONLINE")
+
+    def _on_socket_open_mqtt(self, client, userdata, sock):
+        # Called for each (re)connection, after the TLS handshake and before CONNECT.
+        if self._tcp_user_timeout_ms > 0:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, self._tcp_user_timeout_ms)
 
     def _on_disconnect_mqtt(self, client, userdata, disconnect_flags, reason_code, properties):
         if reason_code != 0:

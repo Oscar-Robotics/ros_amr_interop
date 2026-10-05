@@ -43,7 +43,7 @@ Configuration is via environment variables:
 
   MQTT_ADDRESS, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD
   MQTT_KEEPALIVE (seconds, default 10)
-  MQTT_TCP_USER_TIMEOUT_MS (default 5000; 0 disables): drop the connection when sent data stays unacknowledged
+  MQTT_TCP_USER_TIMEOUT_MS (default 8000; 0 disables): drop the connection when sent data stays unacknowledged
   USE_ENCRYPTION (0/1), MQTT_TLS_CA_CERT, MQTT_TLS_CLIENT_CERT, MQTT_TLS_CLIENT_KEY
   VDA5050_PROTOCOL_VERSION (default 2.0.0)
   MANUFACTURER_NAME, SERIAL_NUMBER, INTERFACE_NAME (default vda5050)
@@ -140,7 +140,7 @@ class MQTTClient:
         self._mqtt_keepalive = int(_env("MQTT_KEEPALIVE", "10"))
         # The robot publishes continuously, so a dead flow is caught ~this long after it dies,
         # sooner than keepalive, which only pings after a quiet period.
-        self._tcp_user_timeout_ms = int(_env("MQTT_TCP_USER_TIMEOUT_MS", "5000"))
+        self._tcp_user_timeout_ms = int(_env("MQTT_TCP_USER_TIMEOUT_MS", "8000"))
         mqtt_username = _env("MQTT_USERNAME", "")
         mqtt_password = _env("MQTT_PASSWORD", "")
 
@@ -172,6 +172,9 @@ class MQTTClient:
         self.mqtt_client.enable_logger(log)
 
         self._cert_file = None
+        self._key_file = None
+        self._cert_mtime = None
+        self._tls_context = None
         # Below step-ca-renew's --expires-in 48h: only a renewal stuck for a day raises it.
         self._cert_warning_window_s = int(_env("CERT_EXPIRY_WARNING_WINDOW", str(24 * 3600)))
         self._cert_check_interval_s = int(_env("CERT_EXPIRY_CHECK_INTERVAL", str(3600)))
@@ -196,6 +199,10 @@ class MQTTClient:
             self._cert_file = cert_file or None
             if cert_file and key_file:
                 context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+                self._key_file = key_file
+                self._cert_mtime = os.stat(cert_file).st_mtime
+                self._tls_context = context
+                self.mqtt_client.on_pre_connect = self._on_pre_connect_mqtt
             else:
                 log.warning(
                     "mTLS: no client cert/key configured — broker will reject the connection. "
@@ -255,6 +262,19 @@ class MQTTClient:
                 )
             )
         self._publish_connection_state("ONLINE")
+
+    def _on_pre_connect_mqtt(self, client, userdata):
+        # step-ca renews the cert file in place (same key). Without this, the cert read at startup
+        # is presented at every reconnection, including after it has expired.
+        try:
+            mtime = os.stat(self._cert_file).st_mtime
+            if mtime == self._cert_mtime:
+                return
+            self._tls_context.load_cert_chain(certfile=self._cert_file, keyfile=self._key_file)
+            self._cert_mtime = mtime
+            log.info("Client certificate reloaded: it was renewed on disk.")
+        except Exception as e:
+            log.warning(f"Could not reload the client certificate, keeping the one in memory: {e}")
 
     def _on_socket_open_mqtt(self, client, userdata, sock):
         # Called for each (re)connection, after the TLS handshake and before CONNECT.

@@ -55,6 +55,7 @@ Configuration is via environment variables:
 import json
 import logging
 import os
+import re
 import socket
 import ssl
 import subprocess
@@ -152,6 +153,10 @@ class MQTTClient:
         self._interface_name = _env("INTERFACE_NAME", "vda5050")
 
         self._socket_path = _env("UNIX_SOCKET_PATH", unix_socket_protocol.DEFAULT_SOCKET_PATH)
+        # Last known position, next to the socket: read by `osc tools network assess` to place
+        # network events on the map. Still updated while MQTT is disconnected.
+        self._pose_file = os.path.join(os.path.dirname(self._socket_path), "pose")
+        self._last_pose_save = 0.0
 
         # IPC state — one client at a time (the ROS2-side mqtt_bridge node).
         self._ipc_lock = threading.Lock()
@@ -456,6 +461,23 @@ class MQTTClient:
                 self._ipc_conn = conn
             self._ipc_read_loop(conn)
 
+    def _save_pose(self, state_json):
+        """Write "x,y,theta,mapId" of the state's agvPosition to the pose file, at most once per second."""
+        now = time.monotonic()
+        if now - self._last_pose_save < 1.0:
+            return
+        self._last_pose_save = now
+        try:
+            pos = json.loads(state_json).get("agvPosition") or {}
+            map_id = re.sub(r"[^\w.-]", "_", str(pos.get("mapId", "")))
+            line = f"{pos['x']:.2f},{pos['y']:.2f},{pos.get('theta', 0.0):.2f},{map_id}\n"
+            tmp = self._pose_file + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(line)
+            os.replace(tmp, self._pose_file)
+        except Exception as e:
+            log.debug(f"Pose not saved: {e}")
+
     def _ipc_read_loop(self, conn):
         conn.settimeout(1.0)
         while not self._stop.is_set():
@@ -473,6 +495,7 @@ class MQTTClient:
                 log.warning(f"Ignoring malformed IPC frame: {frame!r}")
                 continue
             if topic_type == "state":
+                self._save_pose(payload)
                 payload = self._add_cert_errors_to_state(payload)
             self._publish_to_mqtt(topic_type, payload)
 

@@ -895,3 +895,125 @@ def test_repeated_action_id_within_one_message_is_ignored(controller_node):
     ))
 
     assert _reported_action_ids(node).count("cancel-1") == 1
+
+
+def get_order_with_edge_action(order_id, action_id):
+    """One edge carrying a laneSideBias edge action."""
+    return Order(
+        header_id=0,
+        timestamp=get_vda5050_ts(),
+        version="1.1.1",
+        manufacturer="MANUFACTURER",
+        serial_number="SERIAL_NUMBER",
+        order_id=order_id,
+        order_update_id=0,
+        nodes=[
+            Node(
+                node_id="node1",
+                sequence_id=0,
+                released=True,
+                node_position=NodePosition(map_id="map"),
+            ),
+            Node(
+                node_id="node2",
+                sequence_id=2,
+                released=True,
+                node_position=NodePosition(x=1.0, map_id="map"),
+            ),
+        ],
+        edges=[
+            Edge(
+                edge_id="edge1",
+                sequence_id=1,
+                released=True,
+                start_node_id="node1",
+                end_node_id="node2",
+                actions=[
+                    Action(
+                        action_id=action_id,
+                        action_type="laneSideBias",
+                        blocking_type="NONE",
+                        action_parameters=[ActionParameter(key="side", value="left")],
+                    )
+                ],
+            ),
+        ],
+    )
+
+
+def _navigation_aborted():
+    return NavigateToNode.Impl.GetResultService.Response(
+        status=GoalStatus.STATUS_ABORTED, result=NavigateToNode.Result()
+    )
+
+
+def _navigation_result(response):
+    future = Future()
+    future.set_result(result=response)
+    return future
+
+
+def _start_navigating_edge_with_action(node, adapter_node):
+    """Accept an order whose edge has an action and let the adapter accept the goal."""
+    action_id = str(uuid4())
+    node.process_order(get_order_with_edge_action(str(uuid4()), action_id))
+    assert _action_status(node, action_id) == ["WAITING"]
+    for _ in range(10):
+        if node._is_navigation_active():
+            break
+        rclpy.spin_once(node, timeout_sec=0.1)
+        rclpy.spin_once(adapter_node, timeout_sec=0.1)
+    assert node._is_navigation_active()
+    return action_id
+
+
+def test_edge_action_runs_while_the_edge_is_traversed(adapter_node, controller_node):
+    node = controller_node
+    action_id = _start_navigating_edge_with_action(node, adapter_node)
+
+    assert _action_status(node, action_id) == ["RUNNING"]
+
+
+def test_edge_action_finishes_when_the_edge_is_traversed(adapter_node, controller_node):
+    node = controller_node
+    action_id = _start_navigating_edge_with_action(node, adapter_node)
+
+    node._navigate_to_node_result_callback(_navigation_result(_navigation_succeeded()))
+    node._on_active_order()
+
+    assert _action_status(node, action_id) == ["FINISHED"]
+    assert not node._has_current_order()
+
+
+def test_edge_action_fails_when_the_adapter_aborts_the_navigation(adapter_node, controller_node):
+    node = controller_node
+    action_id = _start_navigating_edge_with_action(node, adapter_node)
+
+    node._navigate_to_node_result_callback(_navigation_result(_navigation_aborted()))
+
+    assert _action_status(node, action_id) == ["FAILED"]
+
+
+def test_edge_action_fails_when_the_order_is_canceled(adapter_node, controller_node):
+    node = controller_node
+    action_id = _start_navigating_edge_with_action(node, adapter_node)
+
+    node.process_instant_actions(_instant_actions(("cancel-1", "cancelOrder")))
+    node._on_active_order()
+    node._navigate_to_node_result_callback(_navigation_result(_navigation_cancelled()))
+    node._on_active_order()
+
+    assert _action_status(node, action_id) == ["FAILED"]
+    assert _action_status(node, "cancel-1") == ["FINISHED"]
+    assert not node._has_current_order()
+
+
+def test_edge_action_result_of_a_replaced_order_is_ignored(adapter_node, controller_node):
+    """A late navigation result must not flag a missing action once the order is gone."""
+    node = controller_node
+    _start_navigating_edge_with_action(node, adapter_node)
+    node._delete_action_states()
+
+    node._navigate_to_node_result_callback(_navigation_result(_navigation_succeeded()))
+
+    assert not any(e.error_type == "actionNotFound" for e in node._current_state.errors)

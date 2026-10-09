@@ -156,6 +156,7 @@ class VDA5050Controller(Node):
         self._joined_cancel_action_ids = []
         self._current_node_actions = []
         self._current_node_goal = None
+        self._current_edge_goal = None
         self._current_order = VDAOrder(order_id="-1")
         self._current_state = VDAOrderState(
             header_id=0,
@@ -1543,6 +1544,7 @@ class VDA5050Controller(Node):
         # Send goal to action server
         self.logger.info("Navigate to node goal request sent.")
         self._current_node_goal = node
+        self._current_edge_goal = edge
         _send_goal_future = self._navigate_to_node_act_cli.send_goal_async(goal_msg)
 
         # Register callback to be executed when the goal is accepted
@@ -1562,10 +1564,13 @@ class VDA5050Controller(Node):
             self.logger.error("Navigate to node goal request rejected by adapter. Trying again.")
             self._navigate_to_node_goal_handle = None
             self._current_node_goal = None
+            self._current_edge_goal = None
             return
 
         self.logger.info("Navigate to node goal request accepted by adapter.")
-        # TODO: Execute edge actions
+        # Edge actions are active while the edge is traversed. The adapter receives the edge with
+        # the navigation goal and applies them itself, the controller only reports their status.
+        self._set_edge_action_states(self._current_edge_goal, VDACurrentAction.RUNNING)
 
         # Add callback to handle action result
         _get_result_future = self._navigate_to_node_goal_handle.get_result_async()
@@ -1584,12 +1589,23 @@ class VDA5050Controller(Node):
         """
         self._navigate_to_node_goal_handle = None
 
+        # The edge is left whatever the outcome: its actions end with it
+        status = future.result().status
+        self._set_edge_action_states(
+            self._current_edge_goal,
+            (
+                VDACurrentAction.FINISHED
+                if status == GoalStatus.STATUS_SUCCEEDED
+                else VDACurrentAction.FAILED
+            ),
+        )
+        self._current_edge_goal = None
+
         # When the order is cancelled, this callback should avoid continuing its logic
         if self._canceling_order():
             return
 
         # Check if goal failed
-        status = future.result().status
         if status == GoalStatus.STATUS_ABORTED:
             self.logger.info("Failed to reach goal. Order aborted.")
 
@@ -1633,6 +1649,28 @@ class VDA5050Controller(Node):
             }
         )
         self._process_node(node=last_node)
+
+    def _set_edge_action_states(self, edge: VDAEdge, action_status: str):
+        """
+        Set the status of the actions of an edge.
+
+        Actions that are no longer reported, e.g. because a new order replaced the action states
+        while the navigation goal was still running, are skipped.
+
+        Args:
+        ----
+            edge (VDAEdge): Edge whose actions are updated, None to do nothing.
+            action_status (str): Action status.
+
+        """
+        if edge is None:
+            return
+        reported_action_ids = {
+            action_state.action_id for action_state in self._current_state.action_states
+        }
+        for action in edge.actions:
+            if action.action_id in reported_action_ids:
+                self._update_action_status(action.action_id, action_status)
 
     def _is_navigation_active(self) -> bool:
         """
